@@ -6,6 +6,7 @@ import logging
 import time
 from collections import Counter
 
+from src.chunking.orchestrator import chunk_all_files
 from src.config import GNUCOBOL_SOURCE_DIR
 from src.ingestion.discover import discover_files
 from src.ingestion.preprocess import extract_cobol_from_at, normalize_source
@@ -43,14 +44,20 @@ def run_ingestion() -> None:
 
     _print_extraction_summary(all_programs)
 
-    elapsed = time.perf_counter() - t0
-    logger.info("Phase 1 ingestion completed in %.2fs", elapsed)
+    elapsed_p1 = time.perf_counter() - t0
+    logger.info("Phase 1 ingestion completed in %.2fs", elapsed_p1)
 
-    # --- Phase 2-3 stubs (chunking + embedding) ---
-    # TODO: chunk_all_files(files, all_programs)
+    # --- Phase 2: chunking ---
+    t1 = time.perf_counter()
+    logger.info("Chunking all files …")
+    chunks = chunk_all_files(files, all_programs)
+    elapsed_p2 = time.perf_counter() - t1
+    logger.info("Phase 2 chunking completed: %d chunks in %.2fs", len(chunks), elapsed_p2)
+
+    # --- Phase 3 stub (embedding) ---
     # TODO: embed and upsert into Pinecone
 
-    return files, all_programs
+    return files, all_programs, chunks
 
 
 def _print_extraction_summary(programs):
