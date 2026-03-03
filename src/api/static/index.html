@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>COBOLedu — GnuCOBOL Code Explorer</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #f5f7fa;
+    color: #1a1a2e;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    background: #1F4E79;
+    color: #fff;
+    padding: 1.25rem 1.5rem;
+    text-align: center;
+  }
+  header h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: .02em; }
+  header p  { font-size: .85rem; opacity: .8; margin-top: .25rem; }
+
+  main {
+    flex: 1;
+    width: 100%;
+    max-width: 760px;
+    margin: 0 auto;
+    padding: 2rem 1rem;
+  }
+
+  /* Search */
+  .search-wrap {
+    display: flex;
+    gap: .5rem;
+  }
+  #q {
+    flex: 1;
+    padding: .7rem 1rem;
+    font-size: 1rem;
+    border: 2px solid #c8d6e5;
+    border-radius: 8px;
+    outline: none;
+    transition: border-color .2s;
+  }
+  #q:focus { border-color: #1F4E79; }
+  #btn {
+    padding: .7rem 1.4rem;
+    font-size: 1rem;
+    font-weight: 600;
+    background: #1F4E79;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: opacity .2s;
+    white-space: nowrap;
+  }
+  #btn:hover { opacity: .9; }
+  #btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Spinner */
+  .spinner {
+    display: none;
+    margin: 2rem auto;
+    width: 36px; height: 36px;
+    border: 4px solid #c8d6e5;
+    border-top-color: #1F4E79;
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Answer */
+  #answer {
+    display: none;
+    margin-top: 1.5rem;
+    background: #fff;
+    border-radius: 10px;
+    padding: 1.25rem 1.5rem;
+    box-shadow: 0 1px 4px rgba(0,0,0,.08);
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  #answer code {
+    background: #eef2f7;
+    padding: .15em .35em;
+    border-radius: 4px;
+    font-size: .9em;
+  }
+  #answer pre {
+    background: #1a1a2e;
+    color: #e2e8f0;
+    padding: 1rem;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: .75rem 0;
+    white-space: pre;
+  }
+  #answer pre code {
+    background: none;
+    padding: 0;
+    color: inherit;
+  }
+
+  /* Sources */
+  #sources {
+    display: none;
+    margin-top: 1.25rem;
+  }
+  #sources h3 {
+    font-size: .95rem;
+    margin-bottom: .6rem;
+    color: #555;
+  }
+  .src-card {
+    background: #fff;
+    border-radius: 8px;
+    padding: .85rem 1rem;
+    margin-bottom: .6rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  }
+  .src-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem;
+    align-items: center;
+    margin-bottom: .4rem;
+  }
+  .badge {
+    display: inline-block;
+    font-size: .75rem;
+    font-weight: 600;
+    padding: .2rem .55rem;
+    border-radius: 4px;
+    background: #1F4E79;
+    color: #fff;
+  }
+  .score {
+    font-size: .75rem;
+    color: #888;
+  }
+  .src-preview {
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    font-size: .8rem;
+    background: #f0f4f8;
+    padding: .6rem .75rem;
+    border-radius: 5px;
+    overflow-x: auto;
+    white-space: pre;
+    color: #334155;
+    max-height: 160px;
+  }
+
+  /* Error */
+  .error {
+    display: none;
+    margin-top: 1.5rem;
+    padding: 1rem 1.25rem;
+    background: #fee2e2;
+    color: #991b1b;
+    border-radius: 8px;
+    font-size: .9rem;
+  }
+
+  footer {
+    text-align: center;
+    padding: 1rem;
+    font-size: .75rem;
+    color: #999;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>COBOLedu</h1>
+  <p>GnuCOBOL Code Explorer &mdash; Ask anything about the codebase</p>
+</header>
+
+<main>
+  <form id="form" class="search-wrap" autocomplete="off">
+    <input id="q" type="text" placeholder="e.g. Where is the main entry point of the compiler?" autofocus>
+    <button id="btn" type="submit">Ask</button>
+  </form>
+
+  <div class="spinner" id="spinner"></div>
+  <div class="error" id="error"></div>
+  <div id="answer"></div>
+  <div id="sources"></div>
+</main>
+
+<footer>COBOLedu &middot; Powered by Voyage Code 3 + Pinecone + Claude</footer>
+
+<script>
+const form    = document.getElementById("form");
+const input   = document.getElementById("q");
+const btn     = document.getElementById("btn");
+const spinner = document.getElementById("spinner");
+const ansDiv  = document.getElementById("answer");
+const srcDiv  = document.getElementById("sources");
+const errDiv  = document.getElementById("error");
+
+function hide(...els) { els.forEach(e => e.style.display = "none"); }
+function show(el, d) { el.style.display = d || "block"; }
+
+function renderMarkdown(text) {
+  let html = text
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre><code>${code.trim()}</code></pre>`);
+
+  html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\n/g, "<br>");
+  html = html.replace(/<br>(<pre>)/g, "$1").replace(/(<\/pre>)<br>/g, "$1");
+  return html;
+}
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const question = input.value.trim();
+  if (!question) return;
+
+  hide(ansDiv, srcDiv, errDiv);
+  show(spinner);
+  btn.disabled = true;
+
+  try {
+    const res = await fetch("/api/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question })
+    });
+
+    if (!res.ok) {
+      const detail = await res.json().catch(() => null);
+      throw new Error(detail?.detail || `Request failed (${res.status})`);
+    }
+
+    const data = await res.json();
+
+    ansDiv.innerHTML = renderMarkdown(data.answer);
+    show(ansDiv);
+
+    if (data.sources && data.sources.length) {
+      let html = "<h3>Sources</h3>";
+      for (const s of data.sources) {
+        html += `<div class="src-card">
+          <div class="src-meta">
+            <span class="badge">${esc(s.file_path)}:${s.line_start}-${s.line_end}</span>
+            <span class="badge" style="background:#3b82f6">${esc(s.chunk_type)}</span>
+            <span class="score">score ${s.score.toFixed(3)}</span>
+          </div>
+          <div class="src-preview">${esc(s.preview)}</div>
+        </div>`;
+      }
+      srcDiv.innerHTML = html;
+      show(srcDiv);
+    }
+  } catch (err) {
+    errDiv.textContent = err.message || "Something went wrong. Please try again.";
+    show(errDiv);
+  } finally {
+    hide(spinner);
+    btn.disabled = false;
+  }
+});
+
+function esc(s) {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+</script>
+</body>
+</html>

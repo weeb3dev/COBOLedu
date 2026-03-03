@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pinecone import Pinecone
 from pydantic import BaseModel, Field
 
@@ -15,6 +17,8 @@ from src.config import PINECONE_API_KEY, PINECONE_HOST, PINECONE_INDEX_NAME
 from src.retrieval.query import create_query_engine, query
 
 logger = logging.getLogger(__name__)
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 # ---------------------------------------------------------------------------
@@ -81,28 +85,32 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# API routes (under /api prefix)
 # ---------------------------------------------------------------------------
 
-@app.get("/health", response_model=HealthResponse)
+api = APIRouter(prefix="/api")
+
+
+@api.get("/health", response_model=HealthResponse)
 async def health():
     return HealthResponse(status="ok")
 
 
-@app.get("/stats")
+@api.get("/stats")
 async def stats():
     try:
         idx = _state.get("pinecone_index")
         if idx is None:
             raise HTTPException(status_code=503, detail="Index not initialised")
-        return idx.describe_index_stats()
+        raw = idx.describe_index_stats()
+        return raw.to_dict() if hasattr(raw, "to_dict") else raw
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.post("/query", response_model=QueryResponse)
+@api.post("/query", response_model=QueryResponse)
 async def query_endpoint(req: QueryRequest):
     engine = _state.get("engine")
     if engine is None:
@@ -118,3 +126,9 @@ async def query_endpoint(req: QueryRequest):
         answer=result.answer,
         sources=[SourceResponse(**asdict(s)) for s in result.sources],
     )
+
+
+app.include_router(api)
+
+# Static files mounted last so /api/* routes take priority
+app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
