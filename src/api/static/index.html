@@ -171,6 +171,29 @@
     font-size: .9rem;
   }
 
+  /* Example query chips */
+  #examples {
+    display: flex;
+    justify-content: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+  }
+  .example-chip {
+    background: #fff;
+    border: 1px solid #c8d6e5;
+    color: #1F4E79;
+    font-size: 0.85rem;
+    border-radius: 18px;
+    padding: 0.35rem 0.9rem;
+    cursor: pointer;
+    transition: background .2s, box-shadow .2s;
+  }
+  .example-chip:hover {
+    background: #eef2f7;
+    box-shadow: 0 1px 3px rgba(0,0,0,.1);
+  }
+
   footer {
     text-align: center;
     padding: 1rem;
@@ -192,6 +215,13 @@
     <button id="btn" type="submit">Ask</button>
   </form>
 
+  <div id="examples">
+    <button type="button" class="example-chip">main entry point</button>
+    <button type="button" class="example-chip">PERFORM VARYING loops</button>
+    <button type="button" class="example-chip">CALCULATE-INTEREST</button>
+    <button type="button" class="example-chip">error handling patterns</button>
+  </div>
+
   <div class="status-msg" id="status"></div>
   <div class="error" id="error"></div>
   <div id="answer"></div>
@@ -209,6 +239,7 @@ const status  = document.getElementById("status");
 const ansDiv  = document.getElementById("answer");
 const srcDiv  = document.getElementById("sources");
 const errDiv  = document.getElementById("error");
+const examplesDiv = document.getElementById("examples");
 
 function hide(...els) { els.forEach(e => e.style.display = "none"); }
 function show(el, d) { el.style.display = d || "block"; }
@@ -301,7 +332,7 @@ form.addEventListener("submit", async (e) => {
   const question = input.value.trim();
   if (!question) return;
 
-  hide(ansDiv, srcDiv, errDiv);
+  hide(ansDiv, srcDiv, errDiv, examplesDiv);
   btn.disabled = true;
   startStatusPhases();
 
@@ -374,6 +405,12 @@ form.addEventListener("submit", async (e) => {
     clearStatus();
     btn.disabled = false;
   }
+});
+
+examplesDiv.addEventListener("click", (e) => {
+  if (!e.target.classList.contains("example-chip")) return;
+  input.value = e.target.textContent;
+  form.requestSubmit();
 });
 </script>
 </body>
