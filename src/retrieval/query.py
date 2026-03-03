@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 
@@ -17,6 +18,23 @@ from src.retrieval.embeddings import get_embed_model
 from src.retrieval.vector_store import get_index, get_vector_store
 
 logger = logging.getLogger(__name__)
+
+_REPO_DIR_MARKER = "gnucobol-source/"
+_PATH_PREFIX_RE = re.compile(r"[^\s\"']*?gnucobol-source/")
+
+
+def normalize_path(raw: str) -> str:
+    """Strip everything up to and including 'gnucobol-source/' from a path."""
+    idx = raw.find(_REPO_DIR_MARKER)
+    if idx == -1:
+        return raw
+    return raw[idx + len(_REPO_DIR_MARKER) :]
+
+
+def _scrub_answer_paths(text: str) -> str:
+    """Remove absolute-path prefixes ending in gnucobol-source/ from prose."""
+    return _PATH_PREFIX_RE.sub("", text)
+
 
 CODE_QA_PROMPT_TMPL = """\
 You are a code analysis assistant for the GnuCOBOL project — an open-source COBOL \
@@ -89,7 +107,7 @@ def query(engine: RetrieverQueryEngine, question: str) -> QueryResult:
         text = node.get_content()
         sources.append(
             SourceInfo(
-                file_path=meta.get("file_path", "unknown"),
+                file_path=normalize_path(meta.get("file_path", "unknown")),
                 line_start=meta.get("line_start", 0),
                 line_end=meta.get("line_end", 0),
                 score=round(node.score or 0.0, 4),
@@ -98,7 +116,8 @@ def query(engine: RetrieverQueryEngine, question: str) -> QueryResult:
             )
         )
 
-    return QueryResult(answer=str(response), sources=sources)
+    answer = _scrub_answer_paths(str(response))
+    return QueryResult(answer=answer, sources=sources)
 
 
 def _extract_sources(nodes) -> list[SourceInfo]:
@@ -109,7 +128,7 @@ def _extract_sources(nodes) -> list[SourceInfo]:
         text = node.get_content()
         sources.append(
             SourceInfo(
-                file_path=meta.get("file_path", "unknown"),
+                file_path=normalize_path(meta.get("file_path", "unknown")),
                 line_start=meta.get("line_start", 0),
                 line_end=meta.get("line_end", 0),
                 score=round(node.score or 0.0, 4),
@@ -137,6 +156,7 @@ async def stream_query(
     sources = _extract_sources(nodes)
 
     context_str = "\n\n".join(node.get_content() for node in nodes)
+    context_str = _scrub_answer_paths(context_str)
     prompt = CODE_QA_PROMPT_TMPL.format(context_str=context_str, query_str=question)
 
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
