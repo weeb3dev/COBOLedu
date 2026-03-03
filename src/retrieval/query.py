@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 
+import anthropic
 from llama_index.core import Settings, PromptTemplate
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.llms.anthropic import Anthropic
@@ -96,3 +99,58 @@ def query(engine: RetrieverQueryEngine, question: str) -> QueryResult:
         )
 
     return QueryResult(answer=str(response), sources=sources)
+
+
+def _extract_sources(nodes) -> list[SourceInfo]:
+    """Build SourceInfo list from retrieved NodeWithScore objects."""
+    sources: list[SourceInfo] = []
+    for node in nodes:
+        meta = node.metadata or {}
+        text = node.get_content()
+        sources.append(
+            SourceInfo(
+                file_path=meta.get("file_path", "unknown"),
+                line_start=meta.get("line_start", 0),
+                line_end=meta.get("line_end", 0),
+                score=round(node.score or 0.0, 4),
+                preview=text[:200],
+                chunk_type=meta.get("chunk_type", "unknown"),
+            )
+        )
+    return sources
+
+
+async def stream_query(
+    engine: RetrieverQueryEngine,
+    question: str,
+) -> AsyncGenerator[tuple[str, str | list[SourceInfo]], None]:
+    """Async generator that streams answer tokens then emits sources.
+
+    Yields tuples of (event_type, data):
+      ("token", <str>)   — a chunk of the answer text
+      ("sources", <list>) — SourceInfo list (sent once, after all tokens)
+      ("error", <str>)    — if something goes wrong mid-stream
+    """
+    retriever = engine._retriever
+
+    nodes = await asyncio.to_thread(retriever.retrieve, question)
+    sources = _extract_sources(nodes)
+
+    context_str = "\n\n".join(node.get_content() for node in nodes)
+    prompt = CODE_QA_PROMPT_TMPL.format(context_str=context_str, query_str=question)
+
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    try:
+        async with client.messages.stream(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        ) as stream:
+            async for text in stream.text_stream:
+                yield ("token", text)
+    except Exception as exc:
+        logger.exception("Streaming generation failed")
+        yield ("error", str(exc))
+        return
+
+    yield ("sources", sources)

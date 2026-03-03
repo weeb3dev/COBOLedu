@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -12,9 +13,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pinecone import Pinecone
 from pydantic import BaseModel, Field
+from starlette.responses import StreamingResponse
 
 from src.config import PINECONE_API_KEY, PINECONE_HOST, PINECONE_INDEX_NAME
-from src.retrieval.query import create_query_engine, query
+from src.retrieval.query import create_query_engine, query, stream_query
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +127,34 @@ async def query_endpoint(req: QueryRequest):
     return QueryResponse(
         answer=result.answer,
         sources=[SourceResponse(**asdict(s)) for s in result.sources],
+    )
+
+
+@api.post("/query/stream")
+async def query_stream_endpoint(req: QueryRequest):
+    engine = _state.get("engine")
+    if engine is None:
+        raise HTTPException(status_code=503, detail="Query engine not initialised")
+
+    async def event_generator():
+        try:
+            async for event_type, data in stream_query(engine, req.question):
+                if event_type == "token":
+                    yield f"event: token\ndata: {json.dumps(data)}\n\n"
+                elif event_type == "sources":
+                    payload = [asdict(s) for s in data]
+                    yield f"event: sources\ndata: {json.dumps(payload)}\n\n"
+                elif event_type == "error":
+                    yield f"event: error\ndata: {json.dumps(data)}\n\n"
+            yield "event: done\ndata: \n\n"
+        except Exception as exc:
+            logger.exception("Stream endpoint error")
+            yield f"event: error\ndata: {json.dumps(str(exc))}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
