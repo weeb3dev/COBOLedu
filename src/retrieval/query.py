@@ -9,6 +9,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 
 import anthropic
+from langfuse import observe
 from llama_index.core import Settings, PromptTemplate
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.llms.anthropic import Anthropic
@@ -97,6 +98,7 @@ def create_query_engine() -> RetrieverQueryEngine:
     return engine
 
 
+@observe(name="coboledu-query")
 def query(engine: RetrieverQueryEngine, question: str) -> QueryResult:
     """Run a question through the engine and return structured results."""
     response = engine.query(question)
@@ -139,6 +141,7 @@ def _extract_sources(nodes) -> list[SourceInfo]:
     return sources
 
 
+@observe(name="coboledu-stream-query")
 async def stream_query(
     engine: RetrieverQueryEngine,
     question: str,

@@ -16,6 +16,14 @@ from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from src.config import PINECONE_API_KEY, PINECONE_HOST, PINECONE_INDEX_NAME
+from src.observability import init_observability, langfuse_client
+from src.retrieval.features import (
+    explain_code,
+    extract_business_logic,
+    find_dependencies,
+    find_patterns,
+    generate_docs,
+)
 from src.retrieval.query import create_query_engine, query, stream_query
 
 logger = logging.getLogger(__name__)
@@ -49,6 +57,28 @@ class HealthResponse(BaseModel):
     status: str
 
 
+class ExplainRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=2000)
+
+
+class DependencyRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    direction: str = Field(default="both", pattern="^(both|callers|callees)$")
+
+
+class PatternRequest(BaseModel):
+    description: str = Field(..., min_length=1, max_length=2000)
+
+
+class DocsRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    language: str = Field(default="auto")
+
+
+class BusinessLogicRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+
+
 # ---------------------------------------------------------------------------
 # App state managed via lifespan
 # ---------------------------------------------------------------------------
@@ -58,6 +88,7 @@ _state: dict = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    init_observability()
     logger.info("Initialising query engine …")
     _state["engine"] = create_query_engine()
 
@@ -67,6 +98,7 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Query engine ready.")
     yield
+    langfuse_client.flush()
     _state.clear()
 
 
@@ -123,6 +155,8 @@ async def query_endpoint(req: QueryRequest):
     except Exception as exc:
         logger.exception("Query failed")
         raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        langfuse_client.flush()
 
     return QueryResponse(
         answer=result.answer,
@@ -150,12 +184,97 @@ async def query_stream_endpoint(req: QueryRequest):
         except Exception as exc:
             logger.exception("Stream endpoint error")
             yield f"event: error\ndata: {json.dumps(str(exc))}\n\n"
+        finally:
+            langfuse_client.flush()
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Feature endpoints
+# ---------------------------------------------------------------------------
+
+
+@api.post("/explain")
+async def explain_endpoint(req: ExplainRequest):
+    try:
+        result = explain_code(req.query)
+    except Exception as exc:
+        logger.exception("Explain failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        langfuse_client.flush()
+    return {
+        "explanation": result.explanation,
+        "sources": [asdict(s) for s in result.sources],
+    }
+
+
+@api.post("/dependencies")
+async def dependencies_endpoint(req: DependencyRequest):
+    try:
+        result = find_dependencies(req.name, req.direction)
+    except Exception as exc:
+        logger.exception("Dependency analysis failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        langfuse_client.flush()
+    return {
+        "target": result.target,
+        "callers": result.callers,
+        "callees": result.callees,
+        "analysis": result.analysis,
+        "sources": [asdict(s) for s in result.sources],
+    }
+
+
+@api.post("/patterns")
+async def patterns_endpoint(req: PatternRequest):
+    try:
+        result = find_patterns(req.description)
+    except Exception as exc:
+        logger.exception("Pattern search failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        langfuse_client.flush()
+    return {
+        "description": result.description,
+        "matches": [asdict(s) for s in result.matches],
+    }
+
+
+@api.post("/docs")
+async def docs_endpoint(req: DocsRequest):
+    try:
+        result = generate_docs(req.name, req.language)
+    except Exception as exc:
+        logger.exception("Doc generation failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        langfuse_client.flush()
+    return {
+        "documentation": result.documentation,
+        "sources": [asdict(s) for s in result.sources],
+    }
+
+
+@api.post("/business-logic")
+async def business_logic_endpoint(req: BusinessLogicRequest):
+    try:
+        result = extract_business_logic(req.name)
+    except Exception as exc:
+        logger.exception("Business logic extraction failed")
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        langfuse_client.flush()
+    return {
+        "logic": result.logic,
+        "sources": [asdict(s) for s in result.sources],
+    }
 
 
 app.include_router(api)

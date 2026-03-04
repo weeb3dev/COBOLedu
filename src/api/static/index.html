@@ -33,6 +33,32 @@
     padding: 2rem 1rem;
   }
 
+  /* Mode tabs */
+  .mode-tabs {
+    display: flex;
+    gap: .35rem;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-bottom: 1rem;
+  }
+  .mode-tab {
+    font-size: .8rem;
+    padding: .35rem .75rem;
+    border-radius: 6px;
+    border: 1px solid #c8d6e5;
+    background: #fff;
+    color: #1F4E79;
+    cursor: pointer;
+    transition: all .2s;
+    font-weight: 500;
+  }
+  .mode-tab:hover { background: #eef2f7; }
+  .mode-tab.active {
+    background: #1F4E79;
+    color: #fff;
+    border-color: #1F4E79;
+  }
+
   /* Search */
   .search-wrap {
     display: flex;
@@ -74,7 +100,6 @@
     transition: opacity .35s ease;
   }
   .status-msg.visible { opacity: 1; }
-  .status-msg.fade-out { opacity: 0; }
 
   /* Answer */
   #answer {
@@ -110,6 +135,28 @@
     padding: 0;
     color: inherit;
   }
+  #answer h1, #answer h2, #answer h3 {
+    margin-top: 1rem;
+    margin-bottom: .4rem;
+    color: #1F4E79;
+  }
+  #answer h2 { font-size: 1.1rem; }
+  #answer h3 { font-size: 1rem; }
+
+  /* Dependency badges */
+  .dep-section { margin: .75rem 0; }
+  .dep-section h4 { font-size: .9rem; color: #555; margin-bottom: .3rem; }
+  .dep-list { display: flex; flex-wrap: wrap; gap: .35rem; }
+  .dep-badge {
+    display: inline-block;
+    font-size: .78rem;
+    font-weight: 600;
+    padding: .2rem .55rem;
+    border-radius: 4px;
+    font-family: "SFMono-Regular", Consolas, monospace;
+  }
+  .dep-badge.caller { background: #dbeafe; color: #1e40af; }
+  .dep-badge.callee { background: #dcfce7; color: #166534; }
 
   /* Sources */
   #sources {
@@ -210,6 +257,15 @@
 </header>
 
 <main>
+  <div class="mode-tabs" id="modeTabs">
+    <button class="mode-tab active" data-mode="search">Search</button>
+    <button class="mode-tab" data-mode="explain">Explain</button>
+    <button class="mode-tab" data-mode="dependencies">Dependencies</button>
+    <button class="mode-tab" data-mode="patterns">Patterns</button>
+    <button class="mode-tab" data-mode="docs">Docs</button>
+    <button class="mode-tab" data-mode="business-logic">Business Logic</button>
+  </div>
+
   <form id="form" class="search-wrap" autocomplete="off">
     <input id="q" type="text" placeholder="e.g. Where is the main entry point of the compiler?" autofocus>
     <button id="btn" type="submit">Ask</button>
@@ -240,6 +296,60 @@ const ansDiv  = document.getElementById("answer");
 const srcDiv  = document.getElementById("sources");
 const errDiv  = document.getElementById("error");
 const examplesDiv = document.getElementById("examples");
+const modeTabs = document.getElementById("modeTabs");
+
+let currentMode = "search";
+
+const MODE_CONFIG = {
+  search: {
+    placeholder: "e.g. Where is the main entry point of the compiler?",
+    buttonText: "Ask",
+    examples: ["main entry point", "PERFORM VARYING loops", "CALCULATE-INTEREST", "error handling patterns"],
+    endpoint: "/api/query/stream",
+    streaming: true,
+    bodyKey: "question",
+  },
+  explain: {
+    placeholder: "e.g. Explain what the CALCULATE-INTEREST paragraph does",
+    buttonText: "Explain",
+    examples: ["CALCULATE-INTEREST paragraph", "cob_move function", "INIT-ROUTINE", "main() in cobc.c"],
+    endpoint: "/api/explain",
+    streaming: false,
+    bodyKey: "query",
+  },
+  dependencies: {
+    placeholder: "e.g. INIT-ROUTINE or cob_move",
+    buttonText: "Analyse",
+    examples: ["INIT-ROUTINE", "PROCESS-DATA", "cob_move", "cb_validate_move"],
+    endpoint: "/api/dependencies",
+    streaming: false,
+    bodyKey: "name",
+  },
+  patterns: {
+    placeholder: "e.g. error handling patterns or file I/O operations",
+    buttonText: "Find",
+    examples: ["error handling", "file I/O operations", "loop with counter", "data validation"],
+    endpoint: "/api/patterns",
+    streaming: false,
+    bodyKey: "description",
+  },
+  docs: {
+    placeholder: "e.g. cob_move or CALCULATE-INTEREST",
+    buttonText: "Generate",
+    examples: ["cob_move", "cob_decimal_push", "CALCULATE-INTEREST", "VALIDATE-CUSTOMER"],
+    endpoint: "/api/docs",
+    streaming: false,
+    bodyKey: "name",
+  },
+  "business-logic": {
+    placeholder: "e.g. CALCULATE-INTEREST or VALIDATE-CUSTOMER",
+    buttonText: "Extract",
+    examples: ["CALCULATE-INTEREST", "VALIDATE-CUSTOMER", "PROCESS-DATA", "INIT-ROUTINE"],
+    endpoint: "/api/business-logic",
+    streaming: false,
+    bodyKey: "name",
+  },
+};
 
 function hide(...els) { els.forEach(e => e.style.display = "none"); }
 function show(el, d) { el.style.display = d || "block"; }
@@ -266,6 +376,30 @@ function esc(s) {
   d.textContent = s;
   return d.innerHTML;
 }
+
+/* ---- Mode switching ---- */
+modeTabs.addEventListener("click", (e) => {
+  const tab = e.target.closest(".mode-tab");
+  if (!tab) return;
+  const mode = tab.dataset.mode;
+  if (mode === currentMode) return;
+
+  currentMode = mode;
+  modeTabs.querySelectorAll(".mode-tab").forEach(t => t.classList.remove("active"));
+  tab.classList.add("active");
+
+  const cfg = MODE_CONFIG[mode];
+  input.placeholder = cfg.placeholder;
+  btn.textContent = cfg.buttonText;
+  input.value = "";
+
+  examplesDiv.innerHTML = cfg.examples
+    .map(ex => `<button type="button" class="example-chip">${esc(ex)}</button>`)
+    .join("");
+  show(examplesDiv, "flex");
+
+  hide(ansDiv, srcDiv, errDiv);
+});
 
 /* ---- Status phase manager ---- */
 let statusTimers = [];
@@ -326,81 +460,139 @@ function renderSources(sources) {
   show(srcDiv);
 }
 
+/* ---- Dependency rendering ---- */
+function renderDependencies(data) {
+  let html = "";
+  if (data.callers && data.callers.length) {
+    html += `<div class="dep-section"><h4>Callers (calls ${esc(data.target)})</h4><div class="dep-list">`;
+    data.callers.forEach(c => { html += `<span class="dep-badge caller">${esc(c)}</span>`; });
+    html += `</div></div>`;
+  }
+  if (data.callees && data.callees.length) {
+    html += `<div class="dep-section"><h4>Callees (called by ${esc(data.target)})</h4><div class="dep-list">`;
+    data.callees.forEach(c => { html += `<span class="dep-badge callee">${esc(c)}</span>`; });
+    html += `</div></div>`;
+  }
+  html += renderMarkdown(data.analysis || "");
+  ansDiv.innerHTML = html;
+  show(ansDiv);
+  renderSources(data.sources);
+}
+
+/* ---- Non-streaming feature request ---- */
+async function doFeatureRequest(cfg, inputValue) {
+  const body = {};
+  body[cfg.bodyKey] = inputValue;
+
+  const res = await fetch(cfg.endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null);
+    throw new Error(detail?.detail || `Request failed (${res.status})`);
+  }
+
+  return await res.json();
+}
+
+/* ---- Streaming search request (existing logic) ---- */
+async function doStreamingSearch(question) {
+  let accumulated = "";
+  let firstToken = true;
+
+  const res = await fetch("/api/query/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question })
+  });
+
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null);
+    throw new Error(detail?.detail || `Request failed (${res.status})`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    const lastDoubleNewline = buffer.lastIndexOf("\n\n");
+    if (lastDoubleNewline < 0) continue;
+
+    const complete = buffer.slice(0, lastDoubleNewline + 2);
+    buffer = buffer.slice(lastDoubleNewline + 2);
+    const events = parseSSE(complete);
+
+    for (const evt of events) {
+      if (evt.type === "token") {
+        if (firstToken) {
+          clearStatus();
+          show(ansDiv);
+          firstToken = false;
+        }
+        accumulated += JSON.parse(evt.data);
+        ansDiv.innerHTML = renderMarkdown(accumulated);
+      } else if (evt.type === "sources") {
+        renderSources(JSON.parse(evt.data));
+      } else if (evt.type === "error") {
+        const msg = JSON.parse(evt.data);
+        if (accumulated) {
+          ansDiv.innerHTML = renderMarkdown(accumulated)
+            + `<div style="margin-top:1rem;padding:.75rem 1rem;background:#fee2e2;color:#991b1b;border-radius:6px;font-size:.85rem">Stream interrupted \u2014 partial answer shown.<br>${esc(msg)}</div>`;
+        } else {
+          errDiv.textContent = msg;
+          show(errDiv);
+        }
+      }
+    }
+  }
+  return accumulated;
+}
+
 /* ---- Form handler ---- */
 form.addEventListener("submit", async (e) => {
   e.preventDefault();
-  const question = input.value.trim();
-  if (!question) return;
+  const val = input.value.trim();
+  if (!val) return;
 
   hide(ansDiv, srcDiv, errDiv, examplesDiv);
   btn.disabled = true;
   startStatusPhases();
 
-  let accumulated = "";
-  let firstToken = true;
+  const cfg = MODE_CONFIG[currentMode];
 
   try {
-    const res = await fetch("/api/query/stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question })
-    });
+    if (cfg.streaming) {
+      await doStreamingSearch(val);
+    } else {
+      const data = await doFeatureRequest(cfg, val);
+      clearStatus();
 
-    if (!res.ok) {
-      const detail = await res.json().catch(() => null);
-      throw new Error(detail?.detail || `Request failed (${res.status})`);
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-
-      const lastDoubleNewline = buffer.lastIndexOf("\n\n");
-      if (lastDoubleNewline < 0) continue;
-
-      const complete = buffer.slice(0, lastDoubleNewline + 2);
-      buffer = buffer.slice(lastDoubleNewline + 2);
-      const events = parseSSE(complete);
-
-      for (const evt of events) {
-        if (evt.type === "token") {
-          if (firstToken) {
-            clearStatus();
-            show(ansDiv);
-            firstToken = false;
-          }
-          accumulated += JSON.parse(evt.data);
-          ansDiv.innerHTML = renderMarkdown(accumulated);
-        } else if (evt.type === "sources") {
-          renderSources(JSON.parse(evt.data));
-        } else if (evt.type === "error") {
-          const msg = JSON.parse(evt.data);
-          if (accumulated) {
-            ansDiv.innerHTML = renderMarkdown(accumulated)
-              + `<div style="margin-top:1rem;padding:.75rem 1rem;background:#fee2e2;color:#991b1b;border-radius:6px;font-size:.85rem">Stream interrupted \u2014 partial answer shown.<br>${esc(msg)}</div>`;
-          } else {
-            errDiv.textContent = msg;
-            show(errDiv);
-          }
-        }
+      if (currentMode === "dependencies") {
+        renderDependencies(data);
+      } else if (currentMode === "patterns") {
+        ansDiv.innerHTML = `<h3>Pattern: ${esc(data.description)}</h3><p>${data.matches.length} matching chunks found</p>`;
+        show(ansDiv);
+        renderSources(data.matches);
+      } else {
+        const content = data.explanation || data.documentation || data.logic || "";
+        ansDiv.innerHTML = renderMarkdown(content);
+        show(ansDiv);
+        renderSources(data.sources);
       }
     }
   } catch (err) {
     clearStatus();
-    if (accumulated) {
-      ansDiv.innerHTML = renderMarkdown(accumulated)
-        + `<div style="margin-top:1rem;padding:.75rem 1rem;background:#fee2e2;color:#991b1b;border-radius:6px;font-size:.85rem">Stream interrupted \u2014 partial answer shown.</div>`;
-      show(ansDiv);
-    } else {
-      errDiv.textContent = err.message || "Something went wrong. Please try again.";
-      show(errDiv);
-    }
+    errDiv.textContent = err.message || "Something went wrong. Please try again.";
+    show(errDiv);
   } finally {
     clearStatus();
     btn.disabled = false;
