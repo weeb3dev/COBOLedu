@@ -37,18 +37,33 @@ def _get_voyage_client() -> voyageai.Client:
     return _vo_client
 
 
-def rerank_nodes(question: str, nodes, top_k: int = TOP_K):
-    """Re-rank retrieved nodes with Voyage rerank-2.5 and return the top-k."""
+def rerank_nodes(
+    question: str,
+    nodes,
+    top_k: int = TOP_K,
+    max_per_file: int = 3,
+):
+    """Re-rank with Voyage rerank-2.5, enforce file diversity, return top-k."""
     if not nodes:
         return nodes
     vo = _get_voyage_client()
     docs = [n.get_content() for n in nodes]
-    reranked = vo.rerank(question, docs, model=RERANK_MODEL, top_k=top_k)
-    result = []
+    reranked = vo.rerank(
+        question, docs, model=RERANK_MODEL, top_k=min(len(docs), top_k * 3),
+    )
+
+    result: list = []
+    file_counts: dict[str, int] = {}
     for r in reranked.results:
         node = nodes[r.index]
-        node.score = r.relevance_score
-        result.append(node)
+        fp = normalize_path(node.metadata.get("file_path", "unknown"))
+        count = file_counts.get(fp, 0)
+        if count < max_per_file:
+            node.score = r.relevance_score
+            result.append(node)
+            file_counts[fp] = count + 1
+            if len(result) >= top_k:
+                break
     return result
 
 
@@ -68,26 +83,39 @@ def _scrub_answer_paths(text: str) -> str:
 # ── Query preprocessing / expansion ──────────────────────────────────────
 
 _COBOL_EXPANSIONS: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"file\s+i/?o", re.I), "READ WRITE OPEN CLOSE FILE fileio"),
-    (re.compile(r"error\s+handl", re.I), "error exception cob_runtime_error"),
+    (re.compile(r"file\s+i/?o", re.I), "READ WRITE OPEN CLOSE FILE fileio.c"),
+    (re.compile(r"error\s+handl", re.I), "error exception cob_runtime_error common.c"),
     (re.compile(r"entry\s+point", re.I), "main argc argv cobc.c"),
-    (re.compile(r"\bdata\s+type", re.I), "PIC PICTURE field type"),
+    (re.compile(r"\bdata\s+type", re.I), "PIC PICTURE field type tree.c field.c"),
     (re.compile(r"\bloop\b", re.I), "PERFORM VARYING UNTIL"),
     (re.compile(r"\bdependenc", re.I), "PERFORM CALL COPY"),
     (re.compile(r"\bnumeric\b", re.I), "cob_decimal add subtract numeric.c"),
     (re.compile(r"\bmemory\s+manag", re.I), "cob_malloc alloc free common.c"),
     (re.compile(r"\bstring\s+oper", re.I), "STRING INSPECT UNSTRING strings.c"),
-    (re.compile(r"\bMOVE\s+statement", re.I), "cob_move move.c"),
+    (re.compile(r"\bMOVE\s+statement", re.I), "cob_move move.c libcob"),
     (re.compile(r"\bscanner|lexer\b", re.I), "scanner.l token lex"),
     (re.compile(r"\bcode\s*gen", re.I), "codegen.c output generate cb_"),
     (re.compile(r"\btype\s+check", re.I), "typeck.c cb_validate"),
-    (re.compile(r"\bparser\b", re.I), "parser.y"),
-    (re.compile(r"\bdialect", re.I), "config/ .conf standard"),
-    (re.compile(r"\bcompiler\s+flag", re.I), "cobc option -f"),
+    (re.compile(r"\bparser\b", re.I), "parser.y cobc YACC grammar syntax rule"),
+    (re.compile(r"\bdialect", re.I), "config/ default.conf standard"),
+    (re.compile(r"\bcompiler\s+flag", re.I), "cobc option -f help.c"),
     (re.compile(r"\bCOPY\b.*\bREPLACE\b", re.I), "COPY REPLACE copybook"),
     (re.compile(r"\bEVALUATE\b", re.I), "EVALUATE WHEN"),
     (re.compile(r"\btest\s+program", re.I), "tests/ .at COBOL test"),
 ]
+
+_FILE_HINT_RE = re.compile(r"\b([a-zA-Z]\w*\.(?:c|h|l|y|conf))\b")
+_COBOL_ID_RE = re.compile(r"\b[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+\b")
+
+
+def extract_file_hints(text: str) -> list[str]:
+    """Extract filename hints like move.c, parser.y from text."""
+    return list(dict.fromkeys(_FILE_HINT_RE.findall(text)))
+
+
+def extract_cobol_identifiers(text: str) -> list[str]:
+    """Extract COBOL-style hyphenated identifiers like CUSTOMER-RECORD."""
+    return list(dict.fromkeys(_COBOL_ID_RE.findall(text)))
 
 
 def preprocess_query(question: str) -> str:
@@ -96,6 +124,12 @@ def preprocess_query(question: str) -> str:
     for pattern, expansion in _COBOL_EXPANSIONS:
         if pattern.search(question):
             extras.append(expansion)
+
+    for cid in extract_cobol_identifiers(question):
+        parts = cid.split("-")
+        if len(parts) >= 2:
+            extras.append(f"{cid} {' '.join(parts)}")
+
     if not extras:
         return question
     return f"{question} {' '.join(extras)}"
@@ -113,12 +147,20 @@ _C_SIGNALS = re.compile(
     r"|\bscanner\b|\blexer\b|\bcodegen\b|\btypeck\b|\bcob_\w+",
     re.I,
 )
+_IMPL_OVERRIDE = re.compile(
+    r"\bdefined\b|\bimplemented\b|\bimplementation\b|\bconfigur",
+    re.I,
+)
 
 
 def _detect_language_filter(question: str) -> str | None:
     """Return 'COBOL' or 'C' if the query strongly targets one language, else None."""
     cobol_hits = len(_COBOL_SIGNALS.findall(question))
     c_hits = len(_C_SIGNALS.findall(question))
+
+    if _IMPL_OVERRIDE.search(question):
+        return None
+
     if cobol_hits >= 1 and c_hits == 0:
         return "COBOL"
     if c_hits >= 2 and cobol_hits == 0:
@@ -126,8 +168,14 @@ def _detect_language_filter(question: str) -> str | None:
     return None
 
 
-def _merged_retrieve(index, expanded_query: str, language: str | None):
-    """Primary retrieval + optional filtered secondary pass, deduplicated."""
+def _merged_retrieve(
+    index,
+    expanded_query: str,
+    language: str | None,
+    file_hints: list[str] | None = None,
+    cobol_ids: list[str] | None = None,
+):
+    """Primary retrieval + language/file-hint/identifier passes, deduplicated."""
     primary = index.as_retriever(similarity_top_k=RETRIEVAL_K)
     nodes = primary.retrieve(expanded_query)
     seen_ids = {n.node_id for n in nodes}
@@ -140,6 +188,22 @@ def _merged_retrieve(index, expanded_query: str, language: str | None):
             similarity_top_k=10, filters=filters,
         )
         for n in secondary.retrieve(expanded_query):
+            if n.node_id not in seen_ids:
+                nodes.append(n)
+                seen_ids.add(n.node_id)
+
+    for hint in (file_hints or [])[:3]:
+        hint_retriever = index.as_retriever(similarity_top_k=5)
+        for n in hint_retriever.retrieve(f"implementation in {hint}"):
+            if n.node_id not in seen_ids:
+                nodes.append(n)
+                seen_ids.add(n.node_id)
+
+    for cid in (cobol_ids or [])[:2]:
+        parts = cid.split("-")
+        id_query = f"{cid} {' '.join(parts)} COBOL paragraph section"
+        id_retriever = index.as_retriever(similarity_top_k=5)
+        for n in id_retriever.retrieve(id_query):
             if n.node_id not in seen_ids:
                 nodes.append(n)
                 seen_ids.add(n.node_id)
@@ -228,8 +292,10 @@ def query(engine: RetrieverQueryEngine, question: str) -> QueryResult:
     index = engine._retriever._index
     expanded = preprocess_query(question)
     lang = _detect_language_filter(question)
-    nodes = _merged_retrieve(index, expanded, lang)
-    nodes = rerank_nodes(question, nodes, top_k=TOP_K)
+    file_hints = extract_file_hints(expanded)
+    cobol_ids = extract_cobol_identifiers(question)
+    nodes = _merged_retrieve(index, expanded, lang, file_hints, cobol_ids)
+    nodes = rerank_nodes(expanded, nodes, top_k=TOP_K)
     sources = _extract_sources(nodes)
 
     context_str = "\n\n".join(node.get_content() for node in nodes)
@@ -290,8 +356,12 @@ async def stream_query(
 
     expanded = preprocess_query(question)
     lang = _detect_language_filter(question)
-    nodes = await asyncio.to_thread(_merged_retrieve, index, expanded, lang)
-    nodes = rerank_nodes(question, nodes, top_k=TOP_K)
+    file_hints = extract_file_hints(expanded)
+    cobol_ids = extract_cobol_identifiers(question)
+    nodes = await asyncio.to_thread(
+        _merged_retrieve, index, expanded, lang, file_hints, cobol_ids,
+    )
+    nodes = rerank_nodes(expanded, nodes, top_k=TOP_K)
     sources = _extract_sources(nodes)
 
     context_str = "\n\n".join(node.get_content() for node in nodes)

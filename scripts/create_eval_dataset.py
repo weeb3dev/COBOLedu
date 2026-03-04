@@ -156,14 +156,14 @@ CONFIG_ITEMS = [
     {
         "input": {"query": "What compiler flags and options are available?"},
         "expected_output": {
-            "expected_files": ["cobc/cobc.c", "config/"],
+            "expected_files": ["cobc/cobc.c", "cobc/help.c", "config/"],
             "expected_terms": ["flag", "option", "-f", "cobc"],
         },
     },
     {
         "input": {"query": "How are COBOL data types defined in GnuCOBOL?"},
         "expected_output": {
-            "expected_files": ["cobc/tree.c", "cobc/field.c"],
+            "expected_files": ["cobc/tree.c", "cobc/tree.h", "cobc/field.c"],
             "expected_terms": ["PIC", "PICTURE", "field", "type"],
         },
     },

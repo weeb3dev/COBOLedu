@@ -24,6 +24,8 @@ from src.retrieval.query import (
     _extract_sources,
     _merged_retrieve,
     _scrub_answer_paths,
+    extract_cobol_identifiers,
+    extract_file_hints,
     normalize_path,
     preprocess_query,
     rerank_nodes,
@@ -48,8 +50,10 @@ def _retrieve(query: str, top_k: int = TOP_K) -> tuple[list, list[SourceInfo]]:
     """Over-retrieve from Pinecone, rerank with Voyage, return top-k."""
     expanded = preprocess_query(query)
     lang = _detect_language_filter(query)
+    file_hints = extract_file_hints(expanded)
+    cobol_ids = extract_cobol_identifiers(query)
     idx = _get_index()
-    nodes = _merged_retrieve(idx, expanded, lang)
+    nodes = _merged_retrieve(idx, expanded, lang, file_hints, cobol_ids)
     nodes = rerank_nodes(query, nodes, top_k=top_k)
     return nodes, _extract_sources(nodes)
 

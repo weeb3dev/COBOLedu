@@ -17,10 +17,14 @@ A RAG (Retrieval-Augmented Generation) system that makes the GnuCOBOL legacy cod
 
 ```
 Query
-  → COBOL-aware query expansion (19 keyword patterns)
+  → COBOL-aware query expansion (19 keyword patterns + identifier decomposition)
   → Voyage Code 3 embedding (with LRU cache)
-  → Pinecone top-20 retrieval + optional language-filtered secondary pass
-  → Voyage rerank-2.5 cross-encoder re-scoring → top-5
+  → Multi-pass Pinecone retrieval:
+      • Primary: top-20 dense similarity search
+      • Secondary: language-filtered pass (COBOL/C routing)
+      • File-hint pass: targeted retrieval for files referenced in expansions
+      • Identifier pass: COBOL-style identifier search (e.g., CUSTOMER-RECORD)
+  → Voyage rerank-2.5 cross-encoder re-scoring with file diversity (max 3 per file) → top-5
   → Claude Sonnet 4 answer generation (with prompt caching)
   → Response cached via TTLCache (1 hour TTL)
 ```
@@ -29,7 +33,7 @@ Query
 
 | Metric | Baseline | Current |
 |---|---|---|
-| Precision@5 | 54% | 67% |
+| Precision@5 | 54% | **71%** |
 | Term coverage | — | 93.8% |
 | Codebase coverage | 100% | 100% |
 
@@ -132,6 +136,13 @@ python -m scripts.run_eval --name baseline-v1
 
 Each run produces precision@5, term_coverage, and latency scores visible in the Langfuse experiment dashboard.
 
+Run the local diagnostic for a per-item precision breakdown without Langfuse:
+
+```bash
+python -m scripts.eval_diagnostic                # full pipeline (retrieval + LLM)
+python -m scripts.eval_diagnostic --retrieval-only  # skip LLM, just check retrieved files
+```
+
 ## Project Structure
 
 ```
@@ -167,5 +178,6 @@ COBOLedu/
 └── scripts/
     ├── create_index.py               # One-time Pinecone index creation
     ├── create_eval_dataset.py        # Upload eval items to Langfuse
-    └── run_eval.py                   # Run evaluation experiments
+    ├── run_eval.py                   # Run evaluation experiments
+    └── eval_diagnostic.py            # Local per-item precision diagnostic
 ```
