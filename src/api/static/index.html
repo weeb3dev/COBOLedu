@@ -313,16 +313,16 @@ const MODE_CONFIG = {
     placeholder: "e.g. Explain what the CALCULATE-INTEREST paragraph does",
     buttonText: "Explain",
     examples: ["CALCULATE-INTEREST paragraph", "cob_move function", "INIT-ROUTINE", "main() in cobc.c"],
-    endpoint: "/api/explain",
-    streaming: false,
+    endpoint: "/api/explain/stream",
+    streaming: true,
     bodyKey: "query",
   },
   dependencies: {
     placeholder: "e.g. INIT-ROUTINE or cob_move",
     buttonText: "Analyse",
     examples: ["INIT-ROUTINE", "PROCESS-DATA", "cob_move", "cb_validate_move"],
-    endpoint: "/api/dependencies",
-    streaming: false,
+    endpoint: "/api/dependencies/stream",
+    streaming: true,
     bodyKey: "name",
   },
   patterns: {
@@ -337,16 +337,16 @@ const MODE_CONFIG = {
     placeholder: "e.g. cob_move or CALCULATE-INTEREST",
     buttonText: "Generate",
     examples: ["cob_move", "cob_decimal_push", "CALCULATE-INTEREST", "VALIDATE-CUSTOMER"],
-    endpoint: "/api/docs",
-    streaming: false,
+    endpoint: "/api/docs/stream",
+    streaming: true,
     bodyKey: "name",
   },
   "business-logic": {
     placeholder: "e.g. CALCULATE-INTEREST or VALIDATE-CUSTOMER",
     buttonText: "Extract",
     examples: ["CALCULATE-INTEREST", "VALIDATE-CUSTOMER", "PROCESS-DATA", "INIT-ROUTINE"],
-    endpoint: "/api/business-logic",
-    streaming: false,
+    endpoint: "/api/business-logic/stream",
+    streaming: true,
     bodyKey: "name",
   },
 };
@@ -498,15 +498,19 @@ async function doFeatureRequest(cfg, inputValue) {
   return await res.json();
 }
 
-/* ---- Streaming search request (existing logic) ---- */
-async function doStreamingSearch(question) {
+/* ---- Generic streaming request (SSE) ---- */
+async function doStreamingRequest(cfg, inputValue) {
   let accumulated = "";
   let firstToken = true;
+  let depMeta = null;
 
-  const res = await fetch("/api/query/stream", {
+  const body = {};
+  body[cfg.bodyKey] = inputValue;
+
+  const res = await fetch(cfg.endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question })
+    body: JSON.stringify(body)
   });
 
   if (!res.ok) {
@@ -540,7 +544,23 @@ async function doStreamingSearch(question) {
         }
         accumulated += JSON.parse(evt.data);
         ansDiv.innerHTML = renderMarkdown(accumulated);
+      } else if (evt.type === "metadata") {
+        depMeta = JSON.parse(evt.data);
       } else if (evt.type === "sources") {
+        if (depMeta) {
+          let badgeHtml = "";
+          if (depMeta.callers && depMeta.callers.length) {
+            badgeHtml += `<div class="dep-section"><h4>Callers (calls ${esc(depMeta.target)})</h4><div class="dep-list">`;
+            depMeta.callers.forEach(c => { badgeHtml += `<span class="dep-badge caller">${esc(c)}</span>`; });
+            badgeHtml += `</div></div>`;
+          }
+          if (depMeta.callees && depMeta.callees.length) {
+            badgeHtml += `<div class="dep-section"><h4>Callees (called by ${esc(depMeta.target)})</h4><div class="dep-list">`;
+            depMeta.callees.forEach(c => { badgeHtml += `<span class="dep-badge callee">${esc(c)}</span>`; });
+            badgeHtml += `</div></div>`;
+          }
+          ansDiv.innerHTML = badgeHtml + renderMarkdown(accumulated);
+        }
         renderSources(JSON.parse(evt.data));
       } else if (evt.type === "error") {
         const msg = JSON.parse(evt.data);
@@ -571,14 +591,12 @@ form.addEventListener("submit", async (e) => {
 
   try {
     if (cfg.streaming) {
-      await doStreamingSearch(val);
+      await doStreamingRequest(cfg, val);
     } else {
       const data = await doFeatureRequest(cfg, val);
       clearStatus();
 
-      if (currentMode === "dependencies") {
-        renderDependencies(data);
-      } else if (currentMode === "patterns") {
+      if (currentMode === "patterns") {
         ansDiv.innerHTML = `<h3>Pattern: ${esc(data.description)}</h3><p>${data.matches.length} matching chunks found</p>`;
         show(ansDiv);
         renderSources(data.matches);

@@ -23,6 +23,10 @@ from src.retrieval.features import (
     find_dependencies,
     find_patterns,
     generate_docs,
+    stream_business_logic,
+    stream_dependencies,
+    stream_docs,
+    stream_explain,
 )
 from src.retrieval.query import create_query_engine, query, stream_query
 
@@ -275,6 +279,72 @@ async def business_logic_endpoint(req: BusinessLogicRequest):
         "logic": result.logic,
         "sources": [asdict(s) for s in result.sources],
     }
+
+
+# ---------------------------------------------------------------------------
+# Streaming feature endpoints (SSE)
+# ---------------------------------------------------------------------------
+
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+def _feature_event_generator(stream_gen):
+    """Wrap a feature streaming generator into an SSE event generator."""
+    async def gen():
+        try:
+            async for event_type, data in stream_gen:
+                if event_type == "token":
+                    yield f"event: token\ndata: {json.dumps(data)}\n\n"
+                elif event_type == "sources":
+                    payload = [asdict(s) for s in data]
+                    yield f"event: sources\ndata: {json.dumps(payload)}\n\n"
+                elif event_type == "metadata":
+                    yield f"event: metadata\ndata: {json.dumps(data)}\n\n"
+                elif event_type == "error":
+                    yield f"event: error\ndata: {json.dumps(data)}\n\n"
+            yield "event: done\ndata: \n\n"
+        except Exception as exc:
+            logger.exception("Feature stream error")
+            yield f"event: error\ndata: {json.dumps(str(exc))}\n\n"
+        finally:
+            langfuse_client.flush()
+    return gen()
+
+
+@api.post("/explain/stream")
+async def explain_stream_endpoint(req: ExplainRequest):
+    return StreamingResponse(
+        _feature_event_generator(stream_explain(req.query)),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
+
+
+@api.post("/dependencies/stream")
+async def dependencies_stream_endpoint(req: DependencyRequest):
+    return StreamingResponse(
+        _feature_event_generator(stream_dependencies(req.name, req.direction)),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
+
+
+@api.post("/docs/stream")
+async def docs_stream_endpoint(req: DocsRequest):
+    return StreamingResponse(
+        _feature_event_generator(stream_docs(req.name, req.language)),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
+
+
+@api.post("/business-logic/stream")
+async def business_logic_stream_endpoint(req: BusinessLogicRequest):
+    return StreamingResponse(
+        _feature_event_generator(stream_business_logic(req.name)),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
 
 
 app.include_router(api)

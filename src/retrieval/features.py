@@ -6,8 +6,10 @@ and is decorated with @observe() for automatic Langfuse tracing.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 
 import anthropic
@@ -66,6 +68,29 @@ def _llm_generate(system: str, user: str) -> str:
     return resp.content[0].text
 
 
+async def _aretrieve(query: str, top_k: int = TOP_K) -> tuple[list, list[SourceInfo]]:
+    """Async wrapper around _retrieve() for use in streaming generators."""
+    return await asyncio.to_thread(_retrieve, query, top_k)
+
+
+async def _llm_stream(
+    system: str, user: str,
+) -> AsyncGenerator[str, None]:
+    """Async generator that streams text chunks from Claude."""
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    cached_system = [
+        {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+    ]
+    async with client.messages.stream(
+        model=_CLAUDE_MODEL,
+        max_tokens=_MAX_TOKENS,
+        system=cached_system,
+        messages=[{"role": "user", "content": user}],
+    ) as stream:
+        async for text in stream.text_stream:
+            yield text
+
+
 def _context_from_nodes(nodes) -> str:
     parts = []
     for n in nodes:
@@ -101,6 +126,31 @@ def explain_code(query: str) -> ExplanationResult:
 
     answer = _llm_generate(system, user)
     return ExplanationResult(explanation=answer, sources=sources)
+
+
+@observe(name="coboledu-stream-explain")
+async def stream_explain(
+    query: str,
+) -> AsyncGenerator[tuple[str, str | list[SourceInfo]], None]:
+    """Stream explanation tokens then emit sources."""
+    try:
+        nodes, sources = await _aretrieve(query)
+        context = _context_from_nodes(nodes)
+
+        system = (
+            "You are a code analysis assistant for the GnuCOBOL project. "
+            "When given code snippets, produce a structured explanation with these sections:\n"
+            "## Purpose\n## Inputs / Outputs\n## Key Logic\n## Side Effects\n## Complexity Notes\n\n"
+            "Always cite file paths and line numbers (format: filename:line_start-line_end)."
+        )
+        user = f"Code context:\n{context}\n\nExplain: {query}"
+
+        async for text in _llm_stream(system, user):
+            yield ("token", text)
+        yield ("sources", sources)
+    except Exception as exc:
+        logger.exception("stream_explain failed")
+        yield ("error", str(exc))
 
 
 # ── 2. Dependency Mapping ─────────────────────────────────────────────────
@@ -166,6 +216,46 @@ def _extract_names(text: str, section: str) -> list[str]:
     return names
 
 
+@observe(name="coboledu-stream-dependencies")
+async def stream_dependencies(
+    name: str, direction: str = "both",
+) -> AsyncGenerator[tuple[str, str | list[SourceInfo] | dict], None]:
+    """Stream dependency analysis tokens, then emit metadata + sources."""
+    try:
+        search_query = f"PERFORM {name} CALL {name} function {name}"
+        nodes, sources = await _aretrieve(search_query, top_k=10)
+        context = _context_from_nodes(nodes)
+
+        system = (
+            "You are a dependency analysis assistant for the GnuCOBOL project.\n"
+            "Given code snippets, identify:\n"
+            "1. CALLERS — code that calls/PERFORMs the target\n"
+            "2. CALLEES — code that the target calls/PERFORMs\n\n"
+            "For COBOL: look for PERFORM <name>, CALL <name>.\n"
+            "For C: look for function_name(...) calls.\n\n"
+            "Return your analysis in this format:\n"
+            "## Callers\n- list each with file:line citation\n"
+            "## Callees\n- list each with file:line citation\n"
+            "## Summary\n- brief dependency overview\n\n"
+            "If no callers or callees are found, say so explicitly."
+        )
+        user = f"Code context:\n{context}\n\nAnalyse dependencies for: {name}"
+
+        full_parts: list[str] = []
+        async for text in _llm_stream(system, user):
+            full_parts.append(text)
+            yield ("token", text)
+
+        full_answer = "".join(full_parts)
+        callers = _extract_names(full_answer, "Callers")
+        callees = _extract_names(full_answer, "Callees")
+        yield ("metadata", {"target": name, "callers": callers, "callees": callees})
+        yield ("sources", sources)
+    except Exception as exc:
+        logger.exception("stream_dependencies failed")
+        yield ("error", str(exc))
+
+
 # ── 3. Pattern Detection ─────────────────────────────────────────────────
 
 @dataclass
@@ -214,6 +304,38 @@ def generate_docs(name: str, language: str = "auto") -> DocsResult:
     return DocsResult(documentation=doc, sources=sources)
 
 
+@observe(name="coboledu-stream-docs")
+async def stream_docs(
+    name: str, language: str = "auto",
+) -> AsyncGenerator[tuple[str, str | list[SourceInfo]], None]:
+    """Stream documentation tokens then emit sources."""
+    try:
+        search_query = f"{name} function definition paragraph"
+        if language != "auto":
+            search_query += f" {language}"
+
+        nodes, sources = await _aretrieve(search_query)
+        context = _context_from_nodes(nodes)
+
+        system = (
+            "You are a documentation generator for the GnuCOBOL project.\n"
+            "Given code snippets, produce clean markdown documentation with:\n"
+            "# <name>\n"
+            "## Description\n## Parameters / Data Items\n## Return Value\n"
+            "## Usage Examples\n## Related Functions\n\n"
+            "Cite file paths and line numbers. If the code is COBOL, "
+            "document paragraphs and data items; if C, document functions."
+        )
+        user = f"Code context:\n{context}\n\nGenerate documentation for: {name}"
+
+        async for text in _llm_stream(system, user):
+            yield ("token", text)
+        yield ("sources", sources)
+    except Exception as exc:
+        logger.exception("stream_docs failed")
+        yield ("error", str(exc))
+
+
 # ── 5. Business Logic Extraction ─────────────────────────────────────────
 
 @dataclass
@@ -243,3 +365,33 @@ def extract_business_logic(name: str) -> BusinessLogicResult:
 
     logic = _llm_generate(system, user)
     return BusinessLogicResult(logic=logic, sources=sources)
+
+
+@observe(name="coboledu-stream-business-logic")
+async def stream_business_logic(
+    name: str,
+) -> AsyncGenerator[tuple[str, str | list[SourceInfo]], None]:
+    """Stream business logic tokens then emit sources."""
+    try:
+        search_query = f"{name} COBOL business logic paragraph"
+        nodes, sources = await _aretrieve(search_query, top_k=8)
+        context = _context_from_nodes(nodes)
+
+        system = (
+            "You are a business analyst for the GnuCOBOL project.\n"
+            "Given COBOL code snippets, extract the embedded business rules.\n"
+            "Structure your output as:\n"
+            "## Business Rules\n- numbered list of rules with conditions and actions\n"
+            "## Data Transformations\n- what data is read, computed, written\n"
+            "## Edge Cases / Validations\n- boundary checks, error conditions\n"
+            "## Plain English Summary\n- one-paragraph explanation\n\n"
+            "Cite file paths and line numbers."
+        )
+        user = f"Code context:\n{context}\n\nExtract business logic for: {name}"
+
+        async for text in _llm_stream(system, user):
+            yield ("token", text)
+        yield ("sources", sources)
+    except Exception as exc:
+        logger.exception("stream_business_logic failed")
+        yield ("error", str(exc))
