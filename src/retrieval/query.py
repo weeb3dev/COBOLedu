@@ -9,12 +9,15 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 
 import anthropic
+import voyageai
+from cachetools import TTLCache
 from langfuse import observe
 from llama_index.core import Settings, PromptTemplate
 from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.vector_stores import ExactMatchFilter, MetadataFilters
 from llama_index.llms.anthropic import Anthropic
 
-from src.config import ANTHROPIC_API_KEY, TOP_K
+from src.config import ANTHROPIC_API_KEY, RERANK_MODEL, RETRIEVAL_K, TOP_K
 from src.retrieval.embeddings import get_embed_model
 from src.retrieval.vector_store import get_index, get_vector_store
 
@@ -22,6 +25,31 @@ logger = logging.getLogger(__name__)
 
 _REPO_DIR_MARKER = "gnucobol-source/"
 _PATH_PREFIX_RE = re.compile(r"[^\s\"']*?gnucobol-source/")
+
+_vo_client: voyageai.Client | None = None
+_query_cache: TTLCache = TTLCache(maxsize=256, ttl=3600)
+
+
+def _get_voyage_client() -> voyageai.Client:
+    global _vo_client
+    if _vo_client is None:
+        _vo_client = voyageai.Client()
+    return _vo_client
+
+
+def rerank_nodes(question: str, nodes, top_k: int = TOP_K):
+    """Re-rank retrieved nodes with Voyage rerank-2.5 and return the top-k."""
+    if not nodes:
+        return nodes
+    vo = _get_voyage_client()
+    docs = [n.get_content() for n in nodes]
+    reranked = vo.rerank(question, docs, model=RERANK_MODEL, top_k=top_k)
+    result = []
+    for r in reranked.results:
+        node = nodes[r.index]
+        node.score = r.relevance_score
+        result.append(node)
+    return result
 
 
 def normalize_path(raw: str) -> str:
@@ -37,15 +65,98 @@ def _scrub_answer_paths(text: str) -> str:
     return _PATH_PREFIX_RE.sub("", text)
 
 
-CODE_QA_PROMPT_TMPL = """\
-You are a code analysis assistant for the GnuCOBOL project — an open-source COBOL \
-compiler written in C with COBOL test programs.
+# ── Query preprocessing / expansion ──────────────────────────────────────
 
-Given the following code snippets retrieved from the codebase, answer the user's \
-question. Always cite specific file paths and line numbers \
-(format: filename:line_start-line_end). If the snippets don't contain enough \
-information, say so clearly and suggest what to search for instead.
+_COBOL_EXPANSIONS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"file\s+i/?o", re.I), "READ WRITE OPEN CLOSE FILE fileio"),
+    (re.compile(r"error\s+handl", re.I), "error exception cob_runtime_error"),
+    (re.compile(r"entry\s+point", re.I), "main argc argv cobc.c"),
+    (re.compile(r"\bdata\s+type", re.I), "PIC PICTURE field type"),
+    (re.compile(r"\bloop\b", re.I), "PERFORM VARYING UNTIL"),
+    (re.compile(r"\bdependenc", re.I), "PERFORM CALL COPY"),
+    (re.compile(r"\bnumeric\b", re.I), "cob_decimal add subtract numeric.c"),
+    (re.compile(r"\bmemory\s+manag", re.I), "cob_malloc alloc free common.c"),
+    (re.compile(r"\bstring\s+oper", re.I), "STRING INSPECT UNSTRING strings.c"),
+    (re.compile(r"\bMOVE\s+statement", re.I), "cob_move move.c"),
+    (re.compile(r"\bscanner|lexer\b", re.I), "scanner.l token lex"),
+    (re.compile(r"\bcode\s*gen", re.I), "codegen.c output generate cb_"),
+    (re.compile(r"\btype\s+check", re.I), "typeck.c cb_validate"),
+    (re.compile(r"\bparser\b", re.I), "parser.y"),
+    (re.compile(r"\bdialect", re.I), "config/ .conf standard"),
+    (re.compile(r"\bcompiler\s+flag", re.I), "cobc option -f"),
+    (re.compile(r"\bCOPY\b.*\bREPLACE\b", re.I), "COPY REPLACE copybook"),
+    (re.compile(r"\bEVALUATE\b", re.I), "EVALUATE WHEN"),
+    (re.compile(r"\btest\s+program", re.I), "tests/ .at COBOL test"),
+]
 
+
+def preprocess_query(question: str) -> str:
+    """Expand a query with COBOL/GnuCOBOL-specific synonyms for better retrieval."""
+    extras: list[str] = []
+    for pattern, expansion in _COBOL_EXPANSIONS:
+        if pattern.search(question):
+            extras.append(expansion)
+    if not extras:
+        return question
+    return f"{question} {' '.join(extras)}"
+
+
+# ── Metadata-based language classification ───────────────────────────────
+
+_COBOL_SIGNALS = re.compile(
+    r"\bCOBOL\b|PERFORM\b|EVALUATE\b|CUSTOMER-RECORD|CALCULATE-|MODULE-"
+    r"|\btest\s+program|\b\.at\s+file|\bparagraph\b|\bCOPY\b|\bcopybook\b",
+    re.I,
+)
+_C_SIGNALS = re.compile(
+    r"\bruntime\b|\blibcob\b|\bcobc\b|\bcompiler\b|\bparser\b"
+    r"|\bscanner\b|\blexer\b|\bcodegen\b|\btypeck\b|\bcob_\w+",
+    re.I,
+)
+
+
+def _detect_language_filter(question: str) -> str | None:
+    """Return 'COBOL' or 'C' if the query strongly targets one language, else None."""
+    cobol_hits = len(_COBOL_SIGNALS.findall(question))
+    c_hits = len(_C_SIGNALS.findall(question))
+    if cobol_hits >= 1 and c_hits == 0:
+        return "COBOL"
+    if c_hits >= 2 and cobol_hits == 0:
+        return "C"
+    return None
+
+
+def _merged_retrieve(index, expanded_query: str, language: str | None):
+    """Primary retrieval + optional filtered secondary pass, deduplicated."""
+    primary = index.as_retriever(similarity_top_k=RETRIEVAL_K)
+    nodes = primary.retrieve(expanded_query)
+    seen_ids = {n.node_id for n in nodes}
+
+    if language:
+        filters = MetadataFilters(
+            filters=[ExactMatchFilter(key="language", value=language)]
+        )
+        secondary = index.as_retriever(
+            similarity_top_k=10, filters=filters,
+        )
+        for n in secondary.retrieve(expanded_query):
+            if n.node_id not in seen_ids:
+                nodes.append(n)
+                seen_ids.add(n.node_id)
+
+    return nodes
+
+
+CODE_QA_SYSTEM = (
+    "You are a code analysis assistant for the GnuCOBOL project — an open-source "
+    "COBOL compiler written in C with COBOL test programs.\n\n"
+    "Given code snippets retrieved from the codebase, answer the user's question. "
+    "Always cite specific file paths and line numbers "
+    "(format: filename:line_start-line_end). If the snippets don't contain enough "
+    "information, say so clearly and suggest what to search for instead."
+)
+
+CODE_QA_USER_TMPL = """\
 Retrieved code:
 {context_str}
 
@@ -54,7 +165,16 @@ Question: {query_str}
 Answer:
 """
 
+CODE_QA_PROMPT_TMPL = f"{CODE_QA_SYSTEM}\n\n{CODE_QA_USER_TMPL}"
 CODE_QA_PROMPT = PromptTemplate(CODE_QA_PROMPT_TMPL)
+
+_CACHED_SYSTEM_BLOCK = [
+    {
+        "type": "text",
+        "text": CODE_QA_SYSTEM,
+        "cache_control": {"type": "ephemeral"},
+    }
+]
 
 
 @dataclass
@@ -89,7 +209,7 @@ def create_query_engine() -> RetrieverQueryEngine:
     vector_store = get_vector_store()
     index = get_index(vector_store)
 
-    retriever = index.as_retriever(similarity_top_k=TOP_K)
+    retriever = index.as_retriever(similarity_top_k=RETRIEVAL_K)
 
     engine = RetrieverQueryEngine.from_args(
         retriever=retriever,
@@ -100,26 +220,33 @@ def create_query_engine() -> RetrieverQueryEngine:
 
 @observe(name="coboledu-query")
 def query(engine: RetrieverQueryEngine, question: str) -> QueryResult:
-    """Run a question through the engine and return structured results."""
-    response = engine.query(question)
+    """Retrieve top-20 (+filtered pass), rerank to top-5, generate answer."""
+    cached = _query_cache.get(question)
+    if cached is not None:
+        return cached
 
-    sources: list[SourceInfo] = []
-    for node in response.source_nodes:
-        meta = node.metadata or {}
-        text = node.get_content()
-        sources.append(
-            SourceInfo(
-                file_path=normalize_path(meta.get("file_path", "unknown")),
-                line_start=meta.get("line_start", 0),
-                line_end=meta.get("line_end", 0),
-                score=round(node.score or 0.0, 4),
-                preview=text[:200],
-                chunk_type=meta.get("chunk_type", "unknown"),
-            )
-        )
+    index = engine._retriever._index
+    expanded = preprocess_query(question)
+    lang = _detect_language_filter(question)
+    nodes = _merged_retrieve(index, expanded, lang)
+    nodes = rerank_nodes(question, nodes, top_k=TOP_K)
+    sources = _extract_sources(nodes)
 
-    answer = _scrub_answer_paths(str(response))
-    return QueryResult(answer=answer, sources=sources)
+    context_str = "\n\n".join(node.get_content() for node in nodes)
+    context_str = _scrub_answer_paths(context_str)
+    user_msg = CODE_QA_USER_TMPL.format(context_str=context_str, query_str=question)
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    resp = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=4096,
+        system=_CACHED_SYSTEM_BLOCK,
+        messages=[{"role": "user", "content": user_msg}],
+    )
+    answer = _scrub_answer_paths(resp.content[0].text)
+    result = QueryResult(answer=answer, sources=sources)
+    _query_cache[question] = result
+    return result
 
 
 def _extract_sources(nodes) -> list[SourceInfo]:
@@ -153,27 +280,42 @@ async def stream_query(
       ("sources", <list>) — SourceInfo list (sent once, after all tokens)
       ("error", <str>)    — if something goes wrong mid-stream
     """
-    retriever = engine._retriever
+    cached = _query_cache.get(question)
+    if cached is not None:
+        yield ("token", cached.answer)
+        yield ("sources", cached.sources)
+        return
 
-    nodes = await asyncio.to_thread(retriever.retrieve, question)
+    index = engine._retriever._index
+
+    expanded = preprocess_query(question)
+    lang = _detect_language_filter(question)
+    nodes = await asyncio.to_thread(_merged_retrieve, index, expanded, lang)
+    nodes = rerank_nodes(question, nodes, top_k=TOP_K)
     sources = _extract_sources(nodes)
 
     context_str = "\n\n".join(node.get_content() for node in nodes)
     context_str = _scrub_answer_paths(context_str)
-    prompt = CODE_QA_PROMPT_TMPL.format(context_str=context_str, query_str=question)
+    user_msg = CODE_QA_USER_TMPL.format(context_str=context_str, query_str=question)
 
+    full_answer_parts: list[str] = []
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
     try:
         async with client.messages.stream(
             model="claude-sonnet-4-20250514",
             max_tokens=4096,
-            messages=[{"role": "user", "content": prompt}],
+            system=_CACHED_SYSTEM_BLOCK,
+            messages=[{"role": "user", "content": user_msg}],
         ) as stream:
             async for text in stream.text_stream:
+                full_answer_parts.append(text)
                 yield ("token", text)
     except Exception as exc:
         logger.exception("Streaming generation failed")
         yield ("error", str(exc))
         return
 
+    _query_cache[question] = QueryResult(
+        answer="".join(full_answer_parts), sources=sources,
+    )
     yield ("sources", sources)

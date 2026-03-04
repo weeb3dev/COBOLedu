@@ -18,9 +18,13 @@ from src.config import ANTHROPIC_API_KEY, TOP_K
 from src.retrieval.embeddings import get_embed_model
 from src.retrieval.query import (
     SourceInfo,
+    _detect_language_filter,
     _extract_sources,
+    _merged_retrieve,
     _scrub_answer_paths,
     normalize_path,
+    preprocess_query,
+    rerank_nodes,
 )
 from src.retrieval.vector_store import get_index, get_vector_store
 
@@ -32,26 +36,31 @@ _MAX_TOKENS = 4096
 
 # ── Shared helpers ────────────────────────────────────────────────────────
 
-def _get_retriever(top_k: int = TOP_K):
+def _get_index():
     Settings.embed_model = get_embed_model()
     vs = get_vector_store()
-    idx = get_index(vs)
-    return idx.as_retriever(similarity_top_k=top_k)
+    return get_index(vs)
 
 
 def _retrieve(query: str, top_k: int = TOP_K) -> tuple[list, list[SourceInfo]]:
-    """Return (raw nodes, SourceInfo list)."""
-    retriever = _get_retriever(top_k)
-    nodes = retriever.retrieve(query)
+    """Over-retrieve from Pinecone, rerank with Voyage, return top-k."""
+    expanded = preprocess_query(query)
+    lang = _detect_language_filter(query)
+    idx = _get_index()
+    nodes = _merged_retrieve(idx, expanded, lang)
+    nodes = rerank_nodes(query, nodes, top_k=top_k)
     return nodes, _extract_sources(nodes)
 
 
 def _llm_generate(system: str, user: str) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    cached_system = [
+        {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+    ]
     resp = client.messages.create(
         model=_CLAUDE_MODEL,
         max_tokens=_MAX_TOKENS,
-        system=system,
+        system=cached_system,
         messages=[{"role": "user", "content": user}],
     )
     return resp.content[0].text
