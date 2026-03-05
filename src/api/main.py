@@ -347,6 +347,44 @@ async def business_logic_stream_endpoint(req: BusinessLogicRequest):
     )
 
 
+# ---------------------------------------------------------------------------
+# File drill-down endpoint
+# ---------------------------------------------------------------------------
+
+SOURCE_ROOT = Path(__file__).resolve().parent.parent.parent / "gnucobol-source"
+
+
+@api.get("/file")
+async def file_endpoint(path: str, line_start: int = 0, line_end: int = 0):
+    """Return file content with surrounding context for drill-down."""
+    if ".." in path or path.startswith("/"):
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    file_path = (SOURCE_ROOT / path).resolve()
+    if not file_path.is_relative_to(SOURCE_ROOT.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    try:
+        content = file_path.read_text(errors="replace")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    lines = content.split("\n")
+    total = len(lines)
+    context = 50
+    win_start = max(0, line_start - context - 1)
+    win_end = min(total, line_end + context)
+
+    return {
+        "content": "\n".join(lines[win_start:win_end]),
+        "start_line": win_start + 1,
+        "end_line": win_end,
+        "total_lines": total,
+    }
+
+
 app.include_router(api)
 
 # Static files mounted last so /api/* routes take priority

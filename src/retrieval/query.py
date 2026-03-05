@@ -327,7 +327,7 @@ def _extract_sources(nodes) -> list[SourceInfo]:
                 line_start=meta.get("line_start", 0),
                 line_end=meta.get("line_end", 0),
                 score=round(node.score or 0.0, 4),
-                preview=text[:200],
+                preview=text[:500],
                 chunk_type=meta.get("chunk_type", "unknown"),
             )
         )

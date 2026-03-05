@@ -39,6 +39,18 @@ Query
 
 Measured via Langfuse experiment tracking across a 20-item evaluation dataset (`coboledu-eval-v1`).
 
+## Query Interface
+
+The web UI at `/` provides a full-featured interface for exploring the codebase:
+
+- **Natural language input** — free-text questions with mode tabs (Search, Explain, Dependencies, Patterns, Docs, Business Logic) and example query chips
+- **Syntax-highlighted code snippets** — Prism.js with C and COBOL grammars applied to source previews and LLM answer code blocks
+- **File paths and line numbers** — each result shows `file:start-end` badges with chunk type
+- **Relevance scores** — Voyage rerank confidence score displayed per source
+- **LLM-generated answers** — streaming markdown rendered in real time via SSE
+- **Full file drill-down** — "Expand" button fetches surrounding context (+/- 50 lines) with line numbers and highlighted original range; "Collapse" to restore preview
+- **Copy everywhere** — copy buttons on source cards, the full answer, and individual code blocks with "Copied!" feedback
+
 ## Code Understanding Features
 
 Five specialized endpoints beyond basic search:
@@ -64,6 +76,7 @@ Five specialized endpoints beyond basic search:
 | `POST` | `/api/patterns` | Pattern detection |
 | `POST` | `/api/docs` | Documentation generation |
 | `POST` | `/api/business-logic` | Business logic extraction |
+| `GET` | `/api/file` | Full file content for drill-down (with line range context) |
 
 ## Caching
 
@@ -172,9 +185,9 @@ COBOLedu/
 │   │   ├── query.py                  # Query pipeline: expand → retrieve → rerank → generate
 │   │   └── features.py              # 5 code understanding features
 │   └── api/
-│       ├── main.py                   # FastAPI app with 9 endpoints
+│       ├── main.py                   # FastAPI app with 10 endpoints
 │       └── static/
-│           └── index.html            # Web UI with mode selector tabs
+│           └── index.html            # Web UI with syntax highlighting, drill-down, and copy
 └── scripts/
     ├── create_index.py               # One-time Pinecone index creation
     ├── create_eval_dataset.py        # Upload eval items to Langfuse
