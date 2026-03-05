@@ -2,6 +2,68 @@
 
 A RAG (Retrieval-Augmented Generation) system that makes the GnuCOBOL legacy codebase queryable through natural language. Ask questions about compiler internals, runtime behavior, COBOL test programs, and more — get answers with exact file paths and line numbers.
 
+**Live demo:** [coboledu-production.up.railway.app](https://coboledu-production.up.railway.app)
+
+**Documentation:**
+- [Build Guide](docs/BUILD_GUIDE.md) — step-by-step tutorial for building your own legacy code RAG system
+- [RAG Architecture](docs/RAG_ARCHITECTURE.md) — technical architecture, retrieval pipeline, failure modes, performance results
+- [Cost Analysis](docs/COST_ANALYSIS.md) — actual spend, per-query costs, production projections
+
+## System Overview
+
+```mermaid
+flowchart TD
+    User[User] --> FastAPI["FastAPI Server (src/api/main.py)"]
+
+    subgraph endpoints [API Surface]
+        QueryEP["/api/query\n/api/query/stream"]
+        ExplainEP["/api/explain"]
+        DepsEP["/api/dependencies"]
+        PatternsEP["/api/patterns"]
+        DocsEP["/api/docs"]
+        BizEP["/api/business-logic"]
+        FileEP["GET /api/file"]
+    end
+
+    FastAPI --> endpoints
+
+    QueryEP --> Pipeline
+    ExplainEP --> Pipeline
+    DepsEP --> Pipeline
+    PatternsEP --> Pipeline
+    DocsEP --> Pipeline
+    BizEP --> Pipeline
+
+    subgraph Pipeline [Retrieval Pipeline]
+        Preprocess["Query Preprocessing\n19 expansion patterns\n+ identifier decomposition"]
+        MultiPass["Multi-Pass Pinecone Retrieval\nPrimary top-20 | Lang top-10\nFile-hint top-5x3 | ID top-5x2"]
+        Dedup[Deduplicate by Node ID]
+        Rerank["Voyage rerank-2.5\nFile diversity: max 3/file"]
+        Generate["Claude Sonnet 4\nGeneration + prompt caching"]
+    end
+
+    Preprocess --> MultiPass
+    MultiPass --> Dedup
+    Dedup --> Rerank
+    Rerank --> Generate
+
+    Generate --> ResponseCache["TTLCache\n256 entries, 1hr TTL"]
+    ResponseCache --> Response["Response\nSync JSON or SSE Stream"]
+
+    subgraph external [External Services]
+        Pinecone["Pinecone Serverless"]
+        Voyage["Voyage Code 3\nEmbedding + Reranking"]
+        Claude["Anthropic Claude API"]
+        Langfuse["Langfuse\nObservability"]
+    end
+
+    MultiPass -.-> Pinecone
+    Preprocess -.-> Voyage
+    Rerank -.-> Voyage
+    Generate -.-> Claude
+    Pipeline -.-> Langfuse
+```
+
 ## Tech Stack
 
 - **Embeddings:** Voyage Code 3 (1024-dim, code-optimized)
@@ -165,10 +227,15 @@ COBOLedu/
 ├── README.md
 ├── requirements.txt
 ├── Procfile                          # Railway deployment
+├── runtime.txt                       # Python 3.12.12
 ├── gnucobol-source/                  # GnuCOBOL repo (gitignored)
+├── docs/
+│   ├── BUILD_GUIDE.md                # Step-by-step build tutorial
+│   ├── RAG_ARCHITECTURE.md           # Technical architecture
+│   └── COST_ANALYSIS.md              # Cost analysis & projections
 ├── src/
 │   ├── config.py                     # Env vars and constants
-│   ├── observability.py              # Langfuse + OpenTelemetry setup
+│   ├── observability.py              # Langfuse + OpenInference setup
 │   ├── cli.py                        # Interactive CLI for testing
 │   ├── ingestion/
 │   │   ├── discover.py               # File discovery & filtering
@@ -185,7 +252,7 @@ COBOLedu/
 │   │   ├── query.py                  # Query pipeline: expand → retrieve → rerank → generate
 │   │   └── features.py              # 5 code understanding features
 │   └── api/
-│       ├── main.py                   # FastAPI app with 10 endpoints
+│       ├── main.py                   # FastAPI app with 15 endpoints
 │       └── static/
 │           └── index.html            # Web UI with syntax highlighting, drill-down, and copy
 └── scripts/
